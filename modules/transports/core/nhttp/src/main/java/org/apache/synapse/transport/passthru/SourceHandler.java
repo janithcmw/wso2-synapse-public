@@ -163,6 +163,7 @@ public class SourceHandler implements NHttpServerEventHandler {
             }
 
             if (protocolState.compareTo(ProtocolState.CLOSING) >= 0) {
+                informWriterError(conn);
                 return;
             }
 
@@ -331,6 +332,7 @@ public class SourceHandler implements NHttpServerEventHandler {
             isTimeoutOccurred = true;
             log.warn("Connection time out while writing the response: " + conn);
         } else if (state == ProtocolState.REQUEST_DONE){
+            informWriterError(conn);
         	isTimeoutOccurred = true;
             log.warn("Connection time out after request is read: " + conn);
         }
@@ -362,6 +364,7 @@ public class SourceHandler implements NHttpServerEventHandler {
             log.warn("Connection closed while writing the response: " + conn);
         } else if (state == ProtocolState.REQUEST_DONE) {
         	isFault = true;
+            informWriterError(conn);
             log.warn("Connection closed by the client after request is read: " + conn);
         }
 
@@ -425,6 +428,7 @@ public class SourceHandler implements NHttpServerEventHandler {
 
                 conn.submitResponse(response);            
                 SourceContext.updateState(conn, ProtocolState.CLOSED);
+                informWriterError(conn);
                 conn.close();
             } catch (Exception ex1) {
                 log.error(ex1.getMessage(), ex1);
@@ -458,6 +462,8 @@ public class SourceHandler implements NHttpServerEventHandler {
 
         if (reader != null) {
             reader.producerError();
+        } else {
+        log.info("Reader null when calling informReaderError");
         }
     }
 
@@ -468,6 +474,8 @@ public class SourceHandler implements NHttpServerEventHandler {
 
         if (writer != null) {
             writer.consumerError();
+        } else {
+            log.info("Writer null when calling informWriterError");
         }
     }
     

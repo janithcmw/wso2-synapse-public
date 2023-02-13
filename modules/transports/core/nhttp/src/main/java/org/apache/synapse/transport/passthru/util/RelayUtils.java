@@ -37,6 +37,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.synapse.transport.nhttp.NhttpConstants;
 import org.apache.synapse.transport.passthru.PassThroughConstants;
 import org.apache.synapse.transport.passthru.Pipe;
+import org.apache.synapse.transport.passthru.ServerWorker;
 import org.apache.synapse.transport.passthru.config.PassThroughConfiguration;
 
 import javax.xml.stream.XMLStreamException;
@@ -159,6 +160,30 @@ public class RelayUtils {
             }
         }
         return;
+    }
+
+    /**
+     * Function to check whether the processing request (enclosed within MessageContext) is a DELETE request without
+     * entity body since we allow to have payload for DELETE requests, we treat same as POST. Hence this function can be
+     * used to deviate DELETE requests without payloads
+     *
+     * @param msgContext MessageContext
+     * @return whether the request is a DELETE without payload
+     */
+    public static boolean isDeleteRequestWithoutPayload(MessageContext msgContext) {
+        if (PassThroughConstants.HTTP_DELETE.equals(msgContext.getProperty(Constants.Configuration.HTTP_METHOD))) {
+
+            //If message builder not invoked (Passthrough may contain entity body) OR delete with payload
+            if (!Boolean.TRUE.equals(msgContext.getProperty(PassThroughConstants.MESSAGE_BUILDER_INVOKED))
+                    || !Boolean.TRUE.equals(msgContext.getProperty(PassThroughConstants.NO_ENTITY_BODY))) {
+                //HTTP DELETE request with payload
+                return false;
+            }
+            //Empty payload delete request
+            return true;
+        }
+        //Not a HTTP DELETE request
+        return false;
     }
 
     private static void processAddressing(MessageContext messageContext) throws AxisFault {
@@ -290,20 +315,69 @@ public class RelayUtils {
     /**
      * Consumes the data in pipe completely in the given message context and discard it
      *
-     * @param msgContext Axis2 Message context which contains the data
+     * @param pipe Pass through pipe
      * @throws AxisFault
      */
-    public static void consumeAndDiscardMessage(MessageContext msgContext) throws AxisFault {
-        final Pipe pipe = (Pipe) msgContext.getProperty(PassThroughConstants.PASS_THROUGH_PIPE);
-        if (pipe != null) {
-            InputStream in = pipe.getInputStream();
-            if (in != null) {
-                try {
+    private static void consume(Pipe pipe) throws AxisFault {
+        InputStream in = pipe.getInputStream();
+        if (in != null) {
+            try {
+                if (pipe.isConsumeRequired()) {
                     IOUtils.copy(in, new NullOutputStream());
-                } catch (IOException exception) {
-                    handleException("Error when consuming the input stream to discard ", exception);
                 }
+            } catch (IOException exception) {
+                handleException("Error when consuming the input stream to discard", exception);
             }
         }
+    }
+
+    /**
+     * Consumes the data in pipe completely in the request message context and discard it
+     *
+     * @param msgContext Axis2 Message context which contains the data
+     * @throws AxisFault AxisFault
+     * @deprecated use {@link #discardRequestMessage(MessageContext)} instead
+     */
+    @Deprecated
+    public static void consumeAndDiscardMessage(MessageContext msgContext) throws AxisFault {
+        discardRequestMessage(msgContext);
+    }
+
+    /**
+     * Consumes the data in pipe completely in the given message context and discard it
+     *
+     * @param msgContext Axis2 Message context which contains the data
+     * @throws AxisFault AxisFault
+     */
+    public static void discardMessage(MessageContext msgContext) throws AxisFault {
+        final Pipe pipe = (Pipe) msgContext.getProperty(PassThroughConstants.PASS_THROUGH_PIPE);
+        if (pipe != null && pipe.hasHttpProducer()) {
+            try {
+                while (!pipe.isProducerCompleted() || pipe.isConsumeRequired()) {
+                    consume(pipe);
+                    if (pipe.isProducerError()) {
+                        break;
+                    }
+                }
+            } catch (IOException exception) {
+                handleException("Error when consuming the input stream to discard", exception);
+            }
+        }
+    }
+
+    /**
+     * Consumes the data in pipe completely in the request message context and discard it
+     *
+     * @param msgContext Axis2 Message context which contains the data
+     * @throws AxisFault AxisFault
+     */
+    public static void discardRequestMessage(MessageContext msgContext) throws AxisFault {
+        // Get the request message context
+        MessageContext requestContext = msgContext;
+        Object outTransportInfo = msgContext.getProperty(Constants.OUT_TRANSPORT_INFO);
+        if (outTransportInfo instanceof ServerWorker) {
+            requestContext = ((ServerWorker) outTransportInfo).getRequestContext();
+        }
+        discardMessage(requestContext);
     }
 }

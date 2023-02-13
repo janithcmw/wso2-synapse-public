@@ -34,6 +34,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.ObjectOutput;
 import java.io.ObjectOutputStream;
+import java.util.concurrent.TimeoutException;
 
 public class RabbitMQProducer implements MessageProducer {
 
@@ -134,7 +135,11 @@ public class RabbitMQProducer implements MessageProducer {
 		} finally {
 			if (channel != null && channel.isOpen())
 				try {
-					channel.close();
+					try {
+						channel.close();
+					} catch (TimeoutException e) {
+						throw new RuntimeException(e);
+					}
 				} catch (IOException e) {
 					logger.error(
 							"Error when closing connection" + synCtx.getMessageID() + ". " + e);

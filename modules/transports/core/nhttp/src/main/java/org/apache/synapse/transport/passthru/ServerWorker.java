@@ -577,7 +577,7 @@ public class ServerWorker implements Runnable {
             } catch (Exception ignore) {
             }
 
-            pipe.setSerializationCompleteWithoutData(true);
+            pipe.setSerializationComplete(true);
 
             SourceContext.setResponse(conn, sourceResponse);
             ProtocolState state = SourceContext.getState(conn);
@@ -608,7 +608,7 @@ public class ServerWorker implements Runnable {
         return null;
     }
 
-    protected MessageContext getRequestContext() {
+    public MessageContext getRequestContext() {
         return msgContext;
     }
 

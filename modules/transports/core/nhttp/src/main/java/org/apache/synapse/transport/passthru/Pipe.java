@@ -20,12 +20,17 @@ import org.apache.http.MalformedChunkCodingException;
 import org.apache.http.nio.ContentDecoder;
 import org.apache.http.nio.ContentEncoder;
 import org.apache.http.nio.IOControl;
+import org.apache.http.nio.NHttpClientConnection;
+import org.apache.http.nio.NHttpServerConnection;
+import org.apache.http.params.HttpConnectionParams;
 import org.apache.synapse.transport.passthru.config.BaseConfiguration;
+import org.apache.synapse.transport.passthru.config.PassThroughConfiguration;
 import org.apache.synapse.transport.passthru.util.ControlledByteBuffer;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -34,6 +39,8 @@ import java.util.concurrent.locks.ReentrantLock;
  * This is a buffer shared by both producers and consumers.
  */
 public class Pipe {
+
+    private static final int DEFAULT_TIME_OUT_VALUE = 180000;
 
     /** IOControl of the reader */
     private IOControl producerIoControl;
@@ -64,6 +71,24 @@ public class Pipe {
     private boolean consumerError = false;
 
     private boolean producerError = false;
+
+    /**
+     * Socket Time out value specified in the nttp properties file.
+     */
+    private static long socketTimeOut = PassThroughConfiguration.getInstance()
+            .getIntProperty(HttpConnectionParams.SO_TIMEOUT, DEFAULT_TIME_OUT_VALUE);
+
+    /**
+     * Boolean state to identify whether write condition await interrupted or timeout exceeded.
+     * Normal behaviour should be the interruption of the await. If some thing went wrong and the write condition
+     * did not got any notification to allow write to the buffer, the await will time out after socket time out
+     * value specified in the nttp properties file.
+     * "true" - if interrupted
+     * "false"- if time out exceeds
+     */
+    private boolean awaitInterrupted = true;
+
+    boolean isStale = false;
 
     private BaseConfiguration baseConfig;
 
@@ -153,9 +178,9 @@ public class Pipe {
                 if (!encoder.isCompleted() && !producerCompleted && hasHttpProducer) {
                     producerIoControl.requestInput();
                 }
-                writeCondition.signalAll();
             }
 
+            writeCondition.signalAll();
             return bytesWritten;
         } finally {
             lock.unlock();
@@ -287,16 +312,9 @@ public class Pipe {
     public synchronized void setSerializationComplete(boolean serializationComplete) {
         if (!this.serializationComplete) {
             this.serializationComplete = serializationComplete;
-            if (consumerIoControl != null && hasData(outputBuffer)) {
+            if (consumerIoControl != null) {
                 consumerIoControl.requestOutput();
             }
-        }
-    }
-
-    public synchronized void setSerializationCompleteWithoutData(boolean serializationComplete) {
-        if (!this.serializationComplete) {
-            this.serializationComplete = serializationComplete;
-            consumerIoControl.requestOutput();
         }
     }
 
@@ -305,6 +323,8 @@ public class Pipe {
     }
 
     public void forceSetSerializationRest(){
+        // If the pipe is reused to send the message out (ex. Failover endpoint retry), need to reset
+        consumerError = false;
         if(this.serializationComplete){
             this.serializationComplete = false;
         }
@@ -349,6 +369,43 @@ public class Pipe {
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * This method returns whether buffer consumption is required or not.
+     *
+     * @return boolean
+     * @throws IOException
+     */
+    public boolean isConsumeRequired() throws IOException {
+        lock.lock();
+        boolean isInputMode = buffer.isInputMode();
+        try {
+            if (isInputMode) {
+                setOutputMode(buffer);
+            }
+            int readRemaining = buffer.remaining();
+            int readPosition = buffer.position();
+            setInputMode(buffer);
+            int writePosition = buffer.position();
+            int writeRemaining = buffer.remaining();
+            // in this method we will return true when the buffer is full when reading didn't happened : writePosition == buffer.capacity() && readPosition == 0
+            // we will return true if we have consumed the message partially and when there is remaining to read
+            return (readRemaining == 0 && writeRemaining == readPosition) || (writePosition == buffer.capacity() && readPosition == 0);
+        } finally {
+            if (isInputMode) {
+                setInputMode(buffer);
+            }
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Checks the state of the producerError property
+     * @return boolean
+     */
+    public boolean isProducerError() {
+        return producerError;
     }
 
     private class ByteBufferInputStream extends InputStream {
@@ -433,6 +490,19 @@ public class Pipe {
                 setInputMode(outputBuffer);
                 if (!outputBuffer.hasRemaining()) {
                     flushContent();
+                    // If consume error happens inside flushContent then need to
+                    // return from here.
+                    if (consumerError || isStale) {
+                        buffer.clear();
+                        return;
+                    }
+
+                    // check whether await time out exceeded and throw an IOException
+                    if(!awaitInterrupted) {
+                        buffer.clear();
+                        throw new IOException("Output buffer write time out exceeded");
+                    }
+
                     setInputMode(outputBuffer);
                 }
                 outputBuffer.put((byte) b);
@@ -449,12 +519,36 @@ public class Pipe {
             try {
                 setInputMode(outputBuffer);
                 int remaining = len;
-                while (remaining > 0 && !consumerError) {
+
+                if (consumerIoControl instanceof NHttpServerConnection) {
+                    if (((NHttpServerConnection) consumerIoControl).isStale()) {
+                        isStale = true;
+                        writeCondition.signalAll();
+                        buffer.clear();
+                        return;
+                    }
+                } else if (consumerIoControl instanceof NHttpClientConnection) {
+                    if (((NHttpClientConnection) consumerIoControl).isStale()) {
+                        isStale = true;
+                        writeCondition.signalAll();
+                        buffer.clear();
+                        return;
+                    }
+                }
+
+                while (remaining > 0 && !consumerError && !isStale && awaitInterrupted) {
                     if (!outputBuffer.hasRemaining()) {
                         flushContent();
-                        if(consumerError){
+                        // If consume error happens inside flushContent then
+                        // need to return from here.
+                        if (consumerError || isStale) {
                             buffer.clear();
                             break;
+                        }
+                        // check whether await time out exceeded and throw an IOException
+                        if (!awaitInterrupted) {
+                            buffer.clear();
+                            throw new IOException("Output buffer write time out exceeded");
                         }
                         setInputMode(outputBuffer);
                     }
@@ -469,21 +563,35 @@ public class Pipe {
         }
 
         private void flushContent() throws IOException {
-            lock.lock();
 
             if(rawSerializationComplete){
                 return;
             }
+            lock.lock();
 
             try {
                 try {
-                    while (hasData(outputBuffer) && !consumerError) {
+                    while (hasData(outputBuffer) && !consumerError && !isStale) {
                         if(consumerError){
                             break;
                         }
                         if (consumerIoControl != null && writeCondition != null) {
                             consumerIoControl.requestOutput();
-                            writeCondition.await();
+                            if (consumerIoControl instanceof NHttpServerConnection) {
+                                if (((NHttpServerConnection) consumerIoControl).isStale()) {
+                                    isStale = true;
+                                    writeCondition.signalAll();
+                                }
+                            } else if (consumerIoControl instanceof NHttpClientConnection) {
+                                if (((NHttpClientConnection) consumerIoControl).isStale()) {
+                                    isStale = true;
+                                    writeCondition.signalAll();
+                                }
+                            }
+                            awaitInterrupted = writeCondition.await(socketTimeOut, TimeUnit.MILLISECONDS);
+                            if(!awaitInterrupted){
+                                break;
+                            }
                         }
                     }
 

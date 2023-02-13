@@ -45,6 +45,7 @@ import java.util.NoSuchElementException;
 import java.util.Properties;
 import java.util.Set;
 import java.util.List;
+import java.util.concurrent.TimeoutException;
 
 public class RabbitMQStore extends AbstractMessageStore {
 	/**
@@ -325,7 +326,11 @@ public class RabbitMQStore extends AbstractMessageStore {
 				channel.queueBind(queueName, exchangeName, routeKey);
 			}
 		} finally {
-			channel.close();
+			try {
+				channel.close();
+			} catch (TimeoutException e) {
+				throw new RuntimeException(e);
+			}
 		}
 	}
 
@@ -344,7 +349,11 @@ public class RabbitMQStore extends AbstractMessageStore {
 				}
 			}
 			try {
-				producerConnection = connectionFactory.newConnection();
+				try {
+					producerConnection = connectionFactory.newConnection();
+				} catch (TimeoutException e) {
+					throw new RuntimeException(e);
+				}
 			} catch (IOException e) {
 				logger.error(nameString() + " cannot create connection to the broker." + e);
 				producerConnection = null;
@@ -463,7 +472,11 @@ public class RabbitMQStore extends AbstractMessageStore {
 		try {
 			// To avoid piling up log files with the error message and throttle retries.
 			if ((System.currentTimeMillis() - retryTime) >= 3000) {
-				connection = connectionFactory.newConnection();
+				try {
+					connection = connectionFactory.newConnection();
+				} catch (TimeoutException e) {
+					throw new RuntimeException(e);
+				}
 				retryTime = -1;
 			}
 		} catch (IOException e) {
