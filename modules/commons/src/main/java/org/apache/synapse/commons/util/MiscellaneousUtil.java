@@ -26,6 +26,7 @@ import org.apache.synapse.commons.SynapseCommonsException;
 
 import javax.xml.stream.XMLStreamException;
 import java.io.*;
+import java.util.Arrays;
 import java.util.Properties;
 
 /**
@@ -130,6 +131,10 @@ public class MiscellaneousUtil {
         if (log.isDebugEnabled()) {
             log.debug("Loading a file '" + filePath + "' from classpath");
         }
+
+		log.info("Loading a file '" + filePath + "' from classpath. The file loading flow is, "
+				+ Arrays.toString(Thread.currentThread().getStackTrace()) + ". From the thread "
+				+ Thread.currentThread().getName() + "-id-" + Thread.currentThread().getId());
         
         InputStream in  = null;
         
